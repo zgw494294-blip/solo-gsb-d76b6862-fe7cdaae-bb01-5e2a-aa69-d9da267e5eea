@@ -5,6 +5,7 @@
 let state = null;
 let editingId = null; // 正在编辑的待发提示 id
 let busy = false;     // 有请求在途时禁用确认按钮，防止重复点击
+let prevStatus = null; // 上一帧状态，用于识别回到开场前的切换
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -68,6 +69,175 @@ function applyState(s) {
 function updateBusy() {
   const btn = $("#confirm-btn");
   if (btn) btn.disabled = busy || !state || !state.current;
+  const archiveBtn = $("#archive-btn");
+  if (archiveBtn) archiveBtn.disabled = busy || archiveSubmitting || !state || state.status === "setup";
+}
+
+/* ---------------------------------------------------------------- 档案库 */
+
+let archiveSubmitting = false; // 归档请求在途，禁用提交防止重复建档案
+
+function statusLabel(status) {
+  return status === "done" ? "已完成" : "提前收场";
+}
+
+function fmtTime(iso) {
+  return iso ? new Date(iso).toLocaleString() : "";
+}
+
+function openArchivesModal() {
+  $("#archives-modal").classList.remove("hidden");
+  loadArchiveList();
+}
+
+function closeArchivesModal() {
+  $("#archives-modal").classList.add("hidden");
+}
+
+async function apiGetJson(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+async function loadArchiveList() {
+  $("#archives-title").textContent = "📚 档案库";
+  $("#archives-body").innerHTML = `<p class="empty">加载中…</p>`;
+  let data;
+  try {
+    data = await apiGetJson("/api/archives");
+  } catch (err) {
+    $("#archives-body").innerHTML = `<p class="empty">档案加载失败：${escapeHtml(err.message)}</p>`;
+    return;
+  }
+  const items = data.archives || [];
+  const canArchive = state && state.status !== "setup";
+  if (!items.length) {
+    $("#archives-body").innerHTML = `
+      <p class="empty">还没有归档档案。演出结束或提前收场后，可点击「归档本场」保存回看。</p>
+      ${canArchive ? `<div class="actions"><button class="primary" data-action="archive-form">归档当前场次 🗂</button></div>` : ""}`;
+    return;
+  }
+  $("#archives-body").innerHTML = `
+    ${canArchive ? `<div class="actions"><button class="primary" data-action="archive-form">归档当前场次 🗂</button></div>` : ""}
+    <ul class="archive-list">
+      ${items.map((a) => `
+        <li class="archive-item" data-action="archive-detail" data-id="${a.id}" tabindex="0">
+          <span class="archive-name">${escapeHtml(a.name)}</span>
+          <span class="archive-meta">
+            <span class="tag ${a.status === "done" ? "done" : "early"}">${statusLabel(a.status)}</span>
+            <span class="time">${fmtTime(a.archived_at)}</span>
+          </span>
+          <span class="archive-count">已发 ${a.issued_count} · 剩余 ${a.pending_count}</span>
+        </li>`).join("")}
+    </ul>`;
+}
+
+async function loadArchiveDetail(id) {
+  $("#archives-title").textContent = "档案详情";
+  $("#archives-body").innerHTML = `<p class="empty">加载中…</p>`;
+  let a;
+  try {
+    a = await apiGetJson("/api/archives/" + encodeURIComponent(id));
+  } catch (err) {
+    $("#archives-body").innerHTML = `
+      <p class="empty">档案加载失败：${escapeHtml(err.message)}</p>
+      <div class="actions"><button data-action="archive-list">← 返回列表</button></div>`;
+    return;
+  }
+  $("#archives-body").innerHTML = `
+    <div class="archive-detail-head">
+      <div class="archive-detail-name">${escapeHtml(a.name)}</div>
+      <div class="archive-detail-meta">
+        <span class="tag ${a.status === "done" ? "done" : "early"}">${statusLabel(a.status)}</span>
+        归档时间：${fmtTime(a.archived_at)}
+      </div>
+    </div>
+    <div class="archive-columns">
+      <div>
+        <h3>已发记录（${a.issued.length}）<span class="hint-inline">按发出顺序</span></h3>
+        <ul class="cue-list">
+          ${a.issued.length ? a.issued.map((c) => `
+            <li class="issued-item">
+              <span class="badge done">✓ ${escapeHtml(c.number)}</span>
+              <span class="content">${escapeHtml(c.content)}</span>
+              <span class="time">${fmtTime(c.issued_at)}</span>
+            </li>`).join("")
+            : `<li class="empty">无已发记录（开场后未发出即收场）</li>`}
+        </ul>
+      </div>
+      <div>
+        <h3>剩余未发（${a.pending.length}）<span class="hint-inline">按待发顺序</span></h3>
+        <ul class="cue-list">
+          ${a.pending.length ? a.pending.map((c) => `
+            <li class="pending-item">
+              <span class="badge">${escapeHtml(c.number)}</span>
+              <span class="content">${escapeHtml(c.content)}</span>
+            </li>`).join("")
+            : `<li class="empty">无（全部提示均已发出）</li>`}
+        </ul>
+      </div>
+    </div>
+    <div class="actions"><button data-action="archive-list">← 返回列表</button></div>`;
+}
+
+function openArchiveForm() {
+  if (!state || state.status === "setup") {
+    toast("开场前没有可归档的场次");
+    return;
+  }
+  $("#archives-title").textContent = "归档本场";
+  $("#archives-body").innerHTML = `
+    <p class="hint">归档后本场将保存为独立档案，并清空当前提示、回到开场前设置；之后录入、重置和重启都不会影响档案。</p>
+    <label class="field-label" for="archive-name">场次名称</label>
+    <input id="archive-name" maxlength="60" placeholder="例如：10 月 1 日晚场" autocomplete="off">
+    <p class="hint-inline">当前页面版本 v${state.version} · ${statusLabel(state.status === "done" ? "done" : "live")}</p>
+    <div class="actions">
+      <button id="archive-submit" class="primary" data-action="archive-submit">保存档案并收场 🗂</button>
+      <button data-action="archive-cancel">取消</button>
+    </div>`;
+  $("#archives-modal").classList.remove("hidden");
+  $("#archive-name").focus();
+}
+
+async function submitArchive() {
+  if (archiveSubmitting) return;
+  const input = $("#archive-name");
+  const name = input.value.trim();
+  if (!name) { toast("请输入场次名称"); input.focus(); return; }
+  archiveSubmitting = true;
+  const btn = $("#archive-submit");
+  if (btn) btn.disabled = true;
+  updateBusy();
+  try {
+    const res = await fetch("/api/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: state.version, name }),
+    });
+    const data = await res.json();
+    if (res.status === 409) {
+      applyState(data.state);
+      closeArchivesModal();
+      toast("归档未生效：操作已过期，页面已刷新为最新状态");
+      return;
+    }
+    if (!res.ok) {
+      toast(data.error || "归档失败");
+      if (btn) btn.disabled = false;
+      return;
+    }
+    // 档案已落库且当前提示已一起清空（同一事务）
+    applyState(data);
+    toast(`已归档「${name}」，当前提示已清空`);
+    loadArchiveList();
+  } catch (err) {
+    toast("网络错误：" + err.message);
+    if (btn) btn.disabled = false;
+  } finally {
+    archiveSubmitting = false;
+    updateBusy();
+  }
 }
 
 /* ---------------------------------------------------------------- 渲染 */
@@ -80,9 +250,12 @@ function render() {
   $("#setup-view").classList.toggle("hidden", !inSetup);
   $("#live-view").classList.toggle("hidden", inSetup);
   if (inSetup) {
-    if (!$$(".cue-row").length) resetSetupRows();
+    // 从演出中/完成回到开场前（开始前加载、重置或归档成功）时清空旧录入
+    if (prevStatus !== "setup") resetSetupRows();
+    prevStatus = "setup";
     return;
   }
+  prevStatus = state.status;
 
   $("#done-banner").classList.toggle("hidden", state.status !== "done");
   $("#progress").textContent =
@@ -253,6 +426,48 @@ $("#start-show").addEventListener("click", () => {
 $("#reset-btn").addEventListener("click", () => {
   if (!confirm("确定要清空当前进度，重新设置本场提示吗？")) return;
   api("/api/reset", {});
+});
+
+/* ---------------------------------------------------------------- 档案事件 */
+
+$("#archives-btn").addEventListener("click", openArchivesModal);
+$("#archive-btn").addEventListener("click", openArchiveForm);
+$("#archives-close").addEventListener("click", closeArchivesModal);
+$("#archives-modal").addEventListener("click", (e) => {
+  if (e.target === $("#archives-modal")) closeArchivesModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#archives-modal").classList.contains("hidden")) {
+    closeArchivesModal();
+  }
+});
+
+$("#archives-body").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn || btn.disabled) return;
+  const action = btn.dataset.action;
+  if (action === "archive-form") {
+    openArchiveForm();
+  } else if (action === "archive-list") {
+    loadArchiveList();
+  } else if (action === "archive-cancel") {
+    closeArchivesModal();
+  } else if (action === "archive-submit") {
+    submitArchive();
+  } else if (action === "archive-detail") {
+    loadArchiveDetail(Number(btn.dataset.id));
+  }
+});
+
+$("#archives-body").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  if (e.target.id === "archive-name") {
+    e.preventDefault();
+    submitArchive();
+    return;
+  }
+  const item = e.target.closest("[data-action='archive-detail']");
+  if (item) loadArchiveDetail(Number(item.dataset.id));
 });
 
 /* ---------------------------------------------------------------- 启动 */

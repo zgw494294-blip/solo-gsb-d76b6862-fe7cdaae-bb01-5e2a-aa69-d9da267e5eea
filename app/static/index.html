@@ -9,7 +9,10 @@
 <body>
   <header>
     <h1>🎭 舞台提示执行台</h1>
-    <span id="version-badge" title="状态版本号">v0</span>
+    <div class="header-ops">
+      <button id="archives-btn" class="ghost">📚 档案库</button>
+      <span id="version-badge" title="状态版本号">v0</span>
+    </div>
   </header>
 
   <div id="toast" role="status"></div>
@@ -31,7 +34,10 @@
 
     <div class="topbar">
       <span id="progress"></span>
-      <button id="reset-btn" class="danger-outline">重新开始</button>
+      <span class="topbar-ops">
+        <button id="archive-btn" class="warning-outline">归档本场 🗂</button>
+        <button id="reset-btn" class="danger-outline">重新开始</button>
+      </span>
     </div>
 
     <div class="columns">
@@ -49,6 +55,17 @@
       </div>
     </div>
   </section>
+
+  <!-- 档案库弹窗：列表 / 详情 / 归档表单 -->
+  <div id="archives-modal" class="overlay hidden">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="档案库">
+      <div class="modal-head">
+        <h2 id="archives-title">📚 档案库</h2>
+        <button id="archives-close" class="ghost" title="关闭">✕</button>
+      </div>
+      <div id="archives-body"></div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

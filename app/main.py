@@ -1,9 +1,12 @@
 """舞台提示执行台 —— FastAPI + SQLite 后端。
 
-并发模型：所有写操作（确认 / 编辑 / 重排 / 设置）都在同一把锁内完成
+并发模型：所有写操作（确认 / 编辑 / 重排 / 归档 / 设置 / 重置）都在同一把锁内
+串行完成；其中带版本号的操作（确认 / 编辑 / 重排 / 归档）在锁内完成
 "检查版本号 -> 修改数据"两个步骤，因此同一版本号上并发的两个操作
-只会有一个生效，另一个收到 409 及最新状态。
+只会有一个生效，另一个收到 409 及最新状态。归档的"写档案 + 清空提示"
+在同一事务内提交，写档案失败时不会清空当前提示。
 """
+import json
 import os
 import sqlite3
 import threading
@@ -68,6 +71,15 @@ def init_db() -> None:
                 issued_at      TEXT,
                 issued_seq     INTEGER                  -- 发出顺序
             );
+            CREATE TABLE IF NOT EXISTS archives (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,              -- 场次名称
+                archived_at TEXT NOT NULL,              -- 归档时间（UTC ISO）
+                status      TEXT NOT NULL,              -- 归档当时状态：live | done
+                version     INTEGER NOT NULL,           -- 归档时携带的页面版本
+                issued      TEXT NOT NULL,              -- 已发：编号/快照/时间（按发出顺序）
+                pending     TEXT NOT NULL               -- 剩余：编号/内容（按待发顺序）
+            );
             """
         )
         conn.execute(
@@ -125,6 +137,55 @@ def bad_request(message: str) -> JSONResponse:
     return JSONResponse(status_code=400, content={"error": message})
 
 
+# ---------------------------------------------------------------- 档案组装
+
+def archive_snapshots(conn: sqlite3.Connection) -> tuple[list[dict], list[dict]]:
+    """读取归档快照：已发按发出顺序、剩余按待发顺序。"""
+    rows = conn.execute("SELECT * FROM cues ORDER BY position ASC, id ASC").fetchall()
+    issued = [
+        {
+            "number": r["number"],
+            "content": r["issued_content"],
+            "issued_at": r["issued_at"],
+        }
+        for r in sorted(
+            (r for r in rows if r["status"] == "issued"),
+            key=lambda r: r["issued_seq"],
+        )
+    ]
+    pending = [
+        {"number": r["number"], "content": r["content"]}
+        for r in rows
+        if r["status"] == "pending"
+    ]
+    return issued, pending
+
+
+def archive_summary(row: sqlite3.Row) -> dict:
+    issued = json.loads(row["issued"])
+    pending = json.loads(row["pending"])
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "archived_at": row["archived_at"],
+        "status": row["status"],
+        "issued_count": len(issued),
+        "pending_count": len(pending),
+    }
+
+
+def archive_detail(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "archived_at": row["archived_at"],
+        "status": row["status"],
+        "version": row["version"],
+        "issued": json.loads(row["issued"]),
+        "pending": json.loads(row["pending"]),
+    }
+
+
 # ---------------------------------------------------------------- 应用
 
 @asynccontextmanager
@@ -149,6 +210,11 @@ class VersionedIn(BaseModel):
     version: int
 
 
+class ArchiveIn(BaseModel):
+    version: int
+    name: str
+
+
 class EditIn(BaseModel):
     version: int
     cue_id: int
@@ -165,6 +231,27 @@ class ReorderIn(BaseModel):
 def get_state():
     with db() as conn:
         return build_state(conn)
+
+
+@app.get("/api/archives")
+def list_archives():
+    """档案列表：按归档时间倒序、同时间按档案 ID 倒序。"""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM archives ORDER BY archived_at DESC, id DESC"
+        ).fetchall()
+        return {"archives": [archive_summary(r) for r in rows]}
+
+
+@app.get("/api/archives/{archive_id}")
+def get_archive(archive_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM archives WHERE id = ?", (archive_id,)
+        ).fetchone()
+        if row is None:
+            return JSONResponse(status_code=404, content={"error": "archive_not_found"})
+        return archive_detail(row)
 
 
 @app.post("/api/setup")
@@ -290,6 +377,48 @@ def reset():
         conn.execute("DELETE FROM cues")
         conn.execute(
             "UPDATE meta SET version = version + 1, status = 'setup' WHERE id = 1"
+        )
+        return build_state(conn)
+
+
+@app.post("/api/archive")
+def archive(body: ArchiveIn):
+    """归档本场并收场。
+
+    仅演出中（live）或已完成（done）可归档；携带页面所见版本号。
+    快照（已发按发出顺序、剩余按待发顺序）写入 archives 与清空 cues、
+    回到 setup、版本号 +1 在同一事务内提交：写档案失败则整体回滚，
+    当前提示不会被清空。同版本的重复归档因版本不再匹配而拿到 409，
+    不会多建档案。
+    """
+    name = body.name.strip()
+    if not name:
+        return bad_request("场次名称不能为空")
+
+    with lock, db() as conn:
+        meta = conn.execute("SELECT version, status FROM meta WHERE id = 1").fetchone()
+        if meta["status"] not in ("live", "done") or body.version != meta["version"]:
+            return conflict(conn)
+
+        issued, pending = archive_snapshots(conn)
+        now = datetime.now(timezone.utc).isoformat()
+        new_version = meta["version"] + 1
+        conn.execute(
+            "INSERT INTO archives (name, archived_at, status, version, issued, pending) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                name,
+                now,
+                meta["status"],
+                meta["version"],
+                json.dumps(issued, ensure_ascii=False),
+                json.dumps(pending, ensure_ascii=False),
+            ),
+        )
+        conn.execute("DELETE FROM cues")
+        conn.execute(
+            "UPDATE meta SET version = ?, status = 'setup' WHERE id = 1",
+            (new_version,),
         )
         return build_state(conn)
 
