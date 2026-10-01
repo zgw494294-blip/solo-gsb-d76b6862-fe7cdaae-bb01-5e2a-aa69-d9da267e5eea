@@ -31,7 +31,20 @@
 
     <div class="topbar">
       <span id="progress"></span>
-      <button id="reset-btn" class="danger-outline">重新开始</button>
+      <span class="topbar-ops">
+        <button id="archive-show-btn">归档本场 📦</button>
+        <button id="reset-btn" class="danger-outline">重新开始</button>
+      </span>
+    </div>
+
+    <div id="archive-bar" class="card hidden">
+      <div class="card-label">归档本场</div>
+      <p class="hint">为本场输入一个<b>非空场次名称</b>，系统将保存已发记录快照与尚未发出的提示，随后清空当前台并回到开场前。</p>
+      <div class="archive-bar-row">
+        <input id="archive-name" maxlength="80" placeholder="场次名称，例如：2026 国庆场·第一幕" aria-label="场次名称">
+        <button id="archive-save-btn" class="primary">保存档案并收场</button>
+        <button id="archive-cancel-btn">取消</button>
+      </div>
     </div>
 
     <div class="columns">
@@ -48,6 +61,16 @@
         <ul id="issued-list" class="cue-list"></ul>
       </div>
     </div>
+  </section>
+
+  <!-- 历史档案（归档后，下一场可回看） -->
+  <section id="archives-view">
+    <div class="archives-head">
+      <h2>📦 档案</h2>
+      <button id="archives-refresh">刷新</button>
+    </div>
+    <div id="archive-list"></div>
+    <div id="archive-detail" class="hidden"></div>
   </section>
 
   <script src="app.js"></script>

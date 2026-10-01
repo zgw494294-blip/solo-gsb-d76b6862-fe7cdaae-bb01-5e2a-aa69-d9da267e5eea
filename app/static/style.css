@@ -214,3 +214,47 @@ button.danger-outline { border-color: var(--red); color: var(--red); background:
 .pending-item.editing .num-input { flex: 0 0 120px; }
 .pending-item.editing .content-input { flex: 1 1 100%; order: 3; }
 .pending-item.editing .ops { margin-left: auto; }
+
+/* ---------- 归档本场 ---------- */
+.topbar-ops { display: flex; gap: 10px; }
+#archive-bar { border-style: dashed; }
+.archive-bar-row { display: flex; gap: 10px; margin-top: 10px; }
+.archive-bar-row input { flex: 1; }
+.archive-bar-row button { flex: none; }
+
+/* ---------- 档案柜 ---------- */
+#archives-view { border-top: 1px solid var(--border); margin-top: 8px; }
+.archives-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.archives-head h2, .archives-head h3 { margin: 0; }
+.archive-list { list-style: none; margin: 0; padding: 0; }
+.archive-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.archive-item:hover, .archive-item.active { border-color: var(--accent); }
+.archive-name { font-weight: 700; }
+.archive-meta { color: var(--muted); font-size: 13px; font-family: ui-monospace, monospace; }
+.arch-status {
+  font-size: 12px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-family: inherit;
+}
+.arch-status.done { color: var(--green); border: 1px solid var(--green); }
+.arch-status.early { color: var(--accent); border: 1px solid var(--accent); }
+.archive-cols { margin-top: 12px; }
+.archive-cols .cue-list .pending-item { opacity: .9; }

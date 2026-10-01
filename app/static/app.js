@@ -4,7 +4,9 @@
  * 服务端版本不一致会返回 409 + 最新状态，页面据此刷新。 */
 let state = null;
 let editingId = null; // 正在编辑的待发提示 id
-let busy = false;     // 有请求在途时禁用确认按钮，防止重复点击
+let busy = false;     // 有请求在途时禁用操作按钮，防止重复点击
+let archives = [];    // 档案列表
+let archiveDetail = null; // 当前打开的档案详情；null 表示只看列表
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -37,7 +39,7 @@ async function api(path, body) {
     });
     const data = await res.json();
     if (res.status === 409) {
-      // 操作过期：同版本已有其他先生效，用最新状态刷新页面
+      // 操作过期：同版本已有其他先生效（含归档），用最新状态刷新页面
       applyState(data.state);
       toast("操作未生效：已有人先操作，页面已刷新为最新状态");
       return null;
@@ -62,12 +64,15 @@ function applyState(s) {
   if (editingId !== null && !s.pending.some((c) => c.id === editingId)) {
     editingId = null; // 正在编辑的提示已不在待发列表（如已被确认）
   }
+  if (s.status === "setup") hideArchiveBar();
   render();
 }
 
 function updateBusy() {
-  const btn = $("#confirm-btn");
-  if (btn) btn.disabled = busy || !state || !state.current;
+  const confirm = $("#confirm-btn");
+  if (confirm) confirm.disabled = busy || !state || !state.current;
+  const save = $("#archive-save-btn");
+  if (save) save.disabled = busy;
 }
 
 /* ---------------------------------------------------------------- 渲染 */
@@ -81,6 +86,7 @@ function render() {
   $("#live-view").classList.toggle("hidden", inSetup);
   if (inSetup) {
     if (!$$(".cue-row").length) resetSetupRows();
+    renderArchives();
     return;
   }
 
@@ -105,6 +111,7 @@ function render() {
 
   renderPending();
   renderIssued();
+  renderArchives();
   updateBusy();
 }
 
@@ -155,6 +162,121 @@ function renderIssued() {
       <span class="time">${t}</span>
     </li>`;
   }).join("");
+}
+
+/* ---------------------------------------------------------------- 归档本场 */
+
+function showArchiveBar() {
+  $("#archive-name").value = "";
+  $("#archive-bar").classList.remove("hidden");
+  $("#archive-name").focus();
+}
+
+function hideArchiveBar() {
+  $("#archive-bar").classList.add("hidden");
+}
+
+async function submitArchive() {
+  const name = $("#archive-name").value.trim();
+  if (!name) { toast("请输入非空的场次名称"); return; }
+  const data = await api("/api/archive", { version: state.version, name });
+  if (data) {
+    hideArchiveBar();
+    await loadArchives();
+    toast(`已归档：${name}`);
+  }
+}
+
+/* ---------------------------------------------------------------- 档案柜 */
+
+function statusLabel(status) {
+  return status === "done"
+    ? `<span class="arch-status done">已完成</span>`
+    : `<span class="arch-status early">提前收场</span>`;
+}
+
+function renderArchives() {
+  const listEl = $("#archive-list");
+  const detailEl = $("#archive-detail");
+  detailEl.classList.toggle("hidden", archiveDetail === null);
+
+  if (!archives.length) {
+    listEl.innerHTML = `<p class="hint">暂无档案。演出中或完成后点击「归档本场」即可保存。</p>`;
+  } else {
+    listEl.innerHTML = `<ul class="archive-list">${archives.map((a) => {
+      const t = new Date(a.created_at).toLocaleString();
+      return `<li class="archive-item${archiveDetail && archiveDetail.id === a.id ? " active" : ""}"
+                  data-action="open-archive" data-id="${a.id}" role="button" tabindex="0">
+        <span class="archive-name">${escapeHtml(a.name)}</span>
+        <span class="archive-meta">${t} · ${statusLabel(a.status)} · 已发 ${a.issued_count}/${a.total}</span>
+      </li>`;
+    }).join("")}</ul>`;
+  }
+
+  if (archiveDetail) renderArchiveDetail(detailEl, archiveDetail);
+}
+
+function renderArchiveDetail(el, a) {
+  const t = new Date(a.created_at).toLocaleString();
+  const issued = a.issued.length
+    ? a.issued.map((c) => {
+        const ts = c.issued_at ? new Date(c.issued_at).toLocaleTimeString() : "";
+        return `<li class="issued-item">
+          <span class="badge done">✓ ${escapeHtml(c.number)}</span>
+          <span class="content">${escapeHtml(c.content)}</span>
+          <span class="time">${ts}</span>
+        </li>`;
+      }).join("")
+    : `<li class="empty">无已发记录（提前收场）</li>`;
+  const pending = a.pending.length
+    ? a.pending.map((c, i) => `<li class="pending-item">
+        <span class="tag ${i === 0 ? "now" : "next"}">待发 ${i + 1}</span>
+        <span class="badge">${escapeHtml(c.number)}</span>
+        <span class="content">${escapeHtml(c.content)}</span>
+      </li>`).join("")
+    : `<li class="empty">无剩余提示（全部已发出）</li>`;
+
+  el.innerHTML = `
+    <div class="archives-head">
+      <h3>${escapeHtml(a.name)}</h3>
+      <button data-action="close-archive">← 返回列表</button>
+    </div>
+    <p class="hint">归档时间：${t} · ${statusLabel(a.status)} · 已发 ${a.issued_count} / 共 ${a.total} · 剩余 ${a.pending_count}</p>
+    <div class="columns archive-cols">
+      <div class="col-side">
+        <h3>已发记录 <span class="hint-inline">（按发出顺序、内容快照）</span></h3>
+        <ul class="cue-list">${issued}</ul>
+      </div>
+      <div class="col-side">
+        <h3>剩余提示 <span class="hint-inline">（按待发顺序）</span></h3>
+        <ul class="cue-list">${pending}</ul>
+      </div>
+    </div>`;
+}
+
+async function loadArchives() {
+  try {
+    const res = await fetch("/api/archives");
+    archives = (await res.json()).archives || [];
+    // 打开中的详情若已不存在则收起
+    if (archiveDetail && !archives.some((a) => a.id === archiveDetail.id)) {
+      archiveDetail = null;
+    }
+    renderArchives();
+  } catch (err) {
+    toast("档案加载失败：" + err.message);
+  }
+}
+
+async function openArchive(id) {
+  try {
+    const res = await fetch(`/api/archives/${id}`);
+    if (res.status === 404) { toast("档案不存在"); return; }
+    archiveDetail = await res.json();
+    renderArchives();
+  } catch (err) {
+    toast("档案加载失败：" + err.message);
+  }
 }
 
 /* ---------------------------------------------------------------- 设置页 */
@@ -221,6 +343,11 @@ document.addEventListener("click", (e) => {
     if (j < 0 || j >= ids.length) return;
     [ids[i], ids[j]] = [ids[j], ids[i]];
     api("/api/reorder", { version: state.version, order: ids });
+  } else if (action === "open-archive") {
+    openArchive(Number(btn.dataset.id));
+  } else if (action === "close-archive") {
+    archiveDetail = null;
+    renderArchives();
   }
 });
 
@@ -251,9 +378,17 @@ $("#start-show").addEventListener("click", () => {
 });
 
 $("#reset-btn").addEventListener("click", () => {
-  if (!confirm("确定要清空当前进度，重新设置本场提示吗？")) return;
+  if (!confirm("确定要清空当前进度，重新设置本场提示吗？（已归档的档案不受影响）")) return;
   api("/api/reset", {});
 });
+
+$("#archive-show-btn").addEventListener("click", showArchiveBar);
+$("#archive-cancel-btn").addEventListener("click", hideArchiveBar);
+$("#archive-save-btn").addEventListener("click", submitArchive);
+$("#archive-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitArchive();
+});
+$("#archives-refresh").addEventListener("click", loadArchives);
 
 /* ---------------------------------------------------------------- 启动 */
 
@@ -264,4 +399,5 @@ $("#reset-btn").addEventListener("click", () => {
   } catch (err) {
     toast("无法连接服务端：" + err.message);
   }
+  loadArchives();
 })();
